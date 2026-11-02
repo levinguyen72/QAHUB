@@ -1,0 +1,12 @@
+node_modules
+dist
+.turbo
+.env
+*.log
+.DS_Store
+apps/web/src/api/generated
+apps/api/openapi.json
+backups
+var
+test-results
+playwright-report

@@ -1,0 +1,86 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ospm
+      POSTGRES_PASSWORD: ospm
+      POSTGRES_DB: ospm
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ospm"]
+      interval: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadmin}
+    volumes:
+      - miniodata:/data
+    ports: ["9000:9000", "9001:9001"]
+
+  minio-init:
+    image: minio/mc
+    depends_on: [minio]
+    entrypoint: >
+      /bin/sh -c "until mc alias set local http://minio:9000 ${S3_ACCESS_KEY:-minioadmin} ${S3_SECRET_KEY:-minioadmin}; do sleep 1; done;
+      mc mb --ignore-existing local/${S3_BUCKET_ATTACHMENTS:-attachments}; exit 0;"
+
+  api:
+    build: { context: ., dockerfile: docker/Dockerfile.api }
+    command: sh -c "pnpm --filter @ospm/api prisma:deploy && node apps/api/dist/main.js"
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://ospm:ospm@postgres:5432/ospm
+      STORAGE_DRIVER: s3
+      S3_ENDPOINT: http://minio:9000
+    depends_on:
+      postgres: { condition: service_healthy }
+      minio: { condition: service_started }
+    expose: ["3000"]
+
+  worker:
+    build: { context: ., dockerfile: docker/Dockerfile.api }
+    command: node apps/api/dist/worker.js
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://ospm:ospm@postgres:5432/ospm
+      STORAGE_DRIVER: s3
+      S3_ENDPOINT: http://minio:9000
+    depends_on:
+      postgres: { condition: service_healthy }
+      api: { condition: service_started }
+
+  nginx:
+    build: { context: ., dockerfile: docker/Dockerfile.web }
+    depends_on: [api]
+    ports: ["8080:80"]
+
+  # Sao lưu: pg_dump hằng đêm giữ 14 bản + mc mirror MinIO (thư mục ./backups)
+  backup:
+    image: postgres:16
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      PGPASSWORD: ospm
+    volumes:
+      - ./backups:/backups
+      - ./docker/backup.sh:/backup.sh:ro
+    entrypoint: ["/bin/sh", "/backup.sh"]
+
+  minio-mirror:
+    image: minio/mc
+    depends_on: [minio]
+    env_file: .env
+    volumes:
+      - ./backups:/backups
+      - ./docker/minio-mirror.sh:/minio-mirror.sh:ro
+    entrypoint: ["/bin/sh", "/minio-mirror.sh"]
+
+volumes:
+  pgdata:
+  miniodata:

@@ -1,0 +1,533 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Ghi chú: CHECK constraint, index một phần (partial), cột tsvector sinh tự động và GIN index
+// được khai báo trong migration SQL (prisma/migrations/0001_init/migration.sql) vì Prisma chưa mô tả được.
+
+model User {
+  id           BigInt    @id @default(autoincrement())
+  email        String    @unique
+  displayName  String    @map("display_name")
+  avatarUrl    String?   @map("avatar_url")
+  passwordHash String    @map("password_hash")
+  systemRole   String    @default("member") @map("system_role")
+  isActive     Boolean   @default(true) @map("is_active")
+  lastLoginAt  DateTime? @map("last_login_at") @db.Timestamptz(6)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  refreshTokens RefreshToken[]
+  memberships   ProjectMember[]
+  ledProjects   Project[]        @relation("ProjectLead")
+  assigned      Issue[]          @relation("IssueAssignee")
+  reported      Issue[]          @relation("IssueReporter")
+  comments      IssueComment[]
+  apiKeysMade   ApiKey[]         @relation("ApiKeyCreator")
+  apiKeysRevoked ApiKey[]        @relation("ApiKeyRevoker")
+  activities    ActivityLog[]
+  statusChanges IssueStatusChange[]
+  attachments   Attachment[]
+  tcCreated     TestCase[]       @relation("TestCaseCreator")
+  tcUpdated     TestCase[]       @relation("TestCaseUpdater")
+  tcVersions    TestCaseVersion[]
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    BigInt    @map("user_id")
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz(6)
+  revokedAt DateTime? @map("revoked_at") @db.Timestamptz(6)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("refresh_tokens")
+}
+
+model Project {
+  id          BigInt    @id @default(autoincrement())
+  key         String    @unique
+  name        String
+  description String?
+  leadId      BigInt?   @map("lead_id")
+  issueSeq    BigInt    @default(0) @map("issue_seq")
+  settings    Json      @default("{}")
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt   DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  lead         User?                @relation("ProjectLead", fields: [leadId], references: [id])
+  members      ProjectMember[]
+  statuses     WorkflowStatus[]
+  transitions  WorkflowTransition[]
+  wfSettings   WorkflowSettings?
+  sprints      Sprint[]
+  labels       Label[]
+  issues       Issue[]
+  apiKeys      ApiKey[]
+  runs         AutomationRun[]
+  attachments  Attachment[]
+  activities   ActivityLog[]
+  requirements Requirement[]
+  categories   TestCategory[]
+  testCases    TestCase[]
+
+  @@map("projects")
+}
+
+model ProjectMember {
+  projectId BigInt   @map("project_id")
+  userId    BigInt   @map("user_id")
+  role      String
+  joinedAt  DateTime @default(now()) @map("joined_at") @db.Timestamptz(6)
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([projectId, userId])
+  @@map("project_members")
+}
+
+model WorkflowStatus {
+  id          BigInt  @id @default(autoincrement())
+  projectId   BigInt  @map("project_id")
+  name        String
+  category    String
+  color       String  @default("#8c8c8c")
+  position    Int
+  showOnBoard Boolean @default(true) @map("show_on_board")
+  isArchived  Boolean @default(false) @map("is_archived")
+  project     Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  transitionsFrom WorkflowTransition[] @relation("TransitionFrom")
+  transitionsTo   WorkflowTransition[] @relation("TransitionTo")
+  initialManualOf WorkflowSettings[]   @relation("InitialManual")
+  initialAutoOf   WorkflowSettings[]   @relation("InitialAuto")
+  acceptOf        WorkflowSettings[]   @relation("AcceptStatus")
+  rejectOf        WorkflowSettings[]   @relation("RejectStatus")
+  issues          Issue[]
+  changesFrom     IssueStatusChange[]  @relation("ChangeFrom")
+  changesTo       IssueStatusChange[]  @relation("ChangeTo")
+
+  @@unique([projectId, name])
+  @@map("workflow_statuses")
+}
+
+model WorkflowTransition {
+  id           BigInt          @id @default(autoincrement())
+  projectId    BigInt          @map("project_id")
+  fromStatusId BigInt?         @map("from_status_id")
+  toStatusId   BigInt          @map("to_status_id")
+  name         String?
+  project      Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  fromStatus   WorkflowStatus? @relation("TransitionFrom", fields: [fromStatusId], references: [id], onDelete: Cascade)
+  toStatus     WorkflowStatus  @relation("TransitionTo", fields: [toStatusId], references: [id], onDelete: Cascade)
+
+  // NULL trong from_status_id nghĩa là "từ mọi trạng thái": unique thật nằm ở migration (COALESCE index)
+  @@map("workflow_transitions")
+}
+
+model WorkflowSettings {
+  projectId             BigInt          @id @map("project_id")
+  initialManualStatusId BigInt          @map("initial_manual_status_id")
+  initialAutoStatusId   BigInt          @map("initial_auto_status_id")
+  acceptStatusId        BigInt?         @map("accept_status_id")
+  rejectStatusId        BigInt?         @map("reject_status_id")
+  allowAnyTransition    Boolean         @default(false) @map("allow_any_transition")
+  updatedAt             DateTime        @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  project               Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  initialManual         WorkflowStatus  @relation("InitialManual", fields: [initialManualStatusId], references: [id])
+  initialAuto           WorkflowStatus  @relation("InitialAuto", fields: [initialAutoStatusId], references: [id])
+  acceptStatus          WorkflowStatus? @relation("AcceptStatus", fields: [acceptStatusId], references: [id])
+  rejectStatus          WorkflowStatus? @relation("RejectStatus", fields: [rejectStatusId], references: [id])
+
+  @@map("workflow_settings")
+}
+
+model WorkflowTemplate {
+  id         BigInt   @id @default(autoincrement())
+  name       String   @unique
+  definition Json
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@map("workflow_templates")
+}
+
+model Sprint {
+  id          BigInt    @id @default(autoincrement())
+  projectId   BigInt    @map("project_id")
+  name        String
+  goal        String?
+  state       String    @default("future")
+  startDate   DateTime? @map("start_date") @db.Date
+  endDate     DateTime? @map("end_date") @db.Date
+  completedAt DateTime? @map("completed_at") @db.Timestamptz(6)
+  position    Int       @default(0)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  deletedAt   DateTime? @map("deleted_at") @db.Timestamptz(6)
+  project     Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  issues      Issue[]
+
+  @@map("sprints")
+}
+
+model Label {
+  id        BigInt       @id @default(autoincrement())
+  projectId BigInt       @map("project_id")
+  name      String
+  color     String       @default("#1677ff")
+  isSystem  Boolean      @default(false) @map("is_system")
+  project   Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  issues    IssueLabel[]
+
+  @@unique([projectId, name])
+  @@map("labels")
+}
+
+model Issue {
+  id                 BigInt    @id @default(autoincrement())
+  projectId          BigInt    @map("project_id")
+  number             BigInt
+  type               String
+  title              String
+  description        Json?
+  statusId           BigInt    @map("status_id")
+  priority           String    @default("medium")
+  source             String    @default("manual")
+  assigneeId         BigInt?   @map("assignee_id")
+  reporterId         BigInt?   @map("reporter_id")
+  createdByApiKeyId  String?   @map("created_by_api_key_id") @db.Uuid
+  parentId           BigInt?   @map("parent_id")
+  sprintId           BigInt?   @map("sprint_id")
+  rank               String
+  estimateMinutes    Int?      @map("estimate_minutes")
+  dueDate            DateTime? @map("due_date") @db.Date
+  resolution         String?
+  duplicateOfId      BigInt?   @map("duplicate_of_id")
+  fingerprint        String?
+  occurrenceCount    Int       @default(1) @map("occurrence_count")
+  firstSeenAt        DateTime? @map("first_seen_at") @db.Timestamptz(6)
+  lastSeenAt         DateTime? @map("last_seen_at") @db.Timestamptz(6)
+  version            Int       @default(1)
+  resolvedAt         DateTime? @map("resolved_at") @db.Timestamptz(6)
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt          DateTime? @map("deleted_at") @db.Timestamptz(6)
+  searchText         Unsupported("tsvector")? @map("search_text")
+
+  project    Project        @relation(fields: [projectId], references: [id])
+  status     WorkflowStatus @relation(fields: [statusId], references: [id])
+  assignee   User?          @relation("IssueAssignee", fields: [assigneeId], references: [id])
+  reporter   User?          @relation("IssueReporter", fields: [reporterId], references: [id])
+  apiKey     ApiKey?        @relation("IssueApiKey", fields: [createdByApiKeyId], references: [id])
+  parent     Issue?         @relation("IssueParent", fields: [parentId], references: [id])
+  children   Issue[]        @relation("IssueParent")
+  sprint     Sprint?        @relation(fields: [sprintId], references: [id])
+  duplicateOf Issue?        @relation("IssueDuplicate", fields: [duplicateOfId], references: [id])
+  duplicates Issue[]        @relation("IssueDuplicate")
+
+  labels       IssueLabel[]
+  linksOut     IssueLink[]         @relation("LinkSource")
+  linksIn      IssueLink[]         @relation("LinkTarget")
+  comments     IssueComment[]
+  statusChanges IssueStatusChange[]
+  results      AutomationResult[]
+  testCaseBugs TestCaseBug[]
+
+  @@unique([projectId, number])
+  @@map("issues")
+}
+
+model IssueLabel {
+  issueId BigInt @map("issue_id")
+  labelId BigInt @map("label_id")
+  issue   Issue  @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  label   Label  @relation(fields: [labelId], references: [id], onDelete: Cascade)
+
+  @@id([issueId, labelId])
+  @@map("issue_labels")
+}
+
+model IssueLink {
+  id       BigInt @id @default(autoincrement())
+  sourceId BigInt @map("source_id")
+  targetId BigInt @map("target_id")
+  type     String
+  source   Issue  @relation("LinkSource", fields: [sourceId], references: [id], onDelete: Cascade)
+  target   Issue  @relation("LinkTarget", fields: [targetId], references: [id], onDelete: Cascade)
+
+  @@unique([sourceId, targetId, type])
+  @@map("issue_links")
+}
+
+model IssueComment {
+  id        BigInt    @id @default(autoincrement())
+  issueId   BigInt    @map("issue_id")
+  authorId  BigInt?   @map("author_id")
+  body      Json
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+  issue     Issue     @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  author    User?     @relation(fields: [authorId], references: [id])
+
+  @@map("issue_comments")
+}
+
+model IssueStatusChange {
+  id           BigInt          @id @default(autoincrement())
+  issueId      BigInt          @map("issue_id")
+  fromStatusId BigInt?         @map("from_status_id")
+  toStatusId   BigInt          @map("to_status_id")
+  changedBy    BigInt?         @map("changed_by")
+  changedAt    DateTime        @default(now()) @map("changed_at") @db.Timestamptz(6)
+  issue        Issue           @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  fromStatus   WorkflowStatus? @relation("ChangeFrom", fields: [fromStatusId], references: [id])
+  toStatus     WorkflowStatus  @relation("ChangeTo", fields: [toStatusId], references: [id])
+  user         User?           @relation(fields: [changedBy], references: [id])
+
+  @@map("issue_status_changes")
+}
+
+model ApiKey {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId  BigInt    @map("project_id")
+  name       String
+  prefix     String    @unique
+  keyHash    String    @unique @map("key_hash")
+  scopes     String[]  @default(["runs:write"])
+  expiresAt  DateTime? @map("expires_at") @db.Timestamptz(6)
+  lastUsedAt DateTime? @map("last_used_at") @db.Timestamptz(6)
+  lastUsedIp String?   @map("last_used_ip") @db.Inet
+  createdBy  BigInt    @map("created_by")
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz(6)
+  revokedBy  BigInt?   @map("revoked_by")
+
+  project  Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  creator  User    @relation("ApiKeyCreator", fields: [createdBy], references: [id])
+  revoker  User?   @relation("ApiKeyRevoker", fields: [revokedBy], references: [id])
+  issues   Issue[] @relation("IssueApiKey")
+  runs     AutomationRun[]
+  attachments Attachment[]
+  activities  ActivityLog[]
+
+  @@map("api_keys")
+}
+
+model AutomationRun {
+  id              BigInt    @id @default(autoincrement())
+  projectId       BigInt    @map("project_id")
+  externalId      String    @map("external_id")
+  name            String?
+  branch          String?
+  commitSha       String?   @map("commit_sha")
+  environment     String?
+  ciUrl           String?   @map("ci_url")
+  status          String    @default("receiving")
+  total           Int       @default(0)
+  passed          Int       @default(0)
+  failed          Int       @default(0)
+  flaky           Int       @default(0)
+  skipped         Int       @default(0)
+  bugsCreated     Int       @default(0) @map("bugs_created")
+  bugsUpdated     Int       @default(0) @map("bugs_updated")
+  durationMs      BigInt?   @map("duration_ms")
+  startedAt       DateTime? @map("started_at") @db.Timestamptz(6)
+  finishedAt      DateTime? @map("finished_at") @db.Timestamptz(6)
+  processingError String?   @map("processing_error")
+  apiKeyId        String?   @map("api_key_id") @db.Uuid
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  project Project             @relation(fields: [projectId], references: [id])
+  apiKey  ApiKey?             @relation(fields: [apiKeyId], references: [id])
+  results AutomationResult[]
+
+  @@unique([projectId, externalId])
+  @@map("automation_runs")
+}
+
+model AutomationResult {
+  id           BigInt   @id @default(autoincrement())
+  runId        BigInt   @map("run_id")
+  testId       String   @map("test_id")
+  file         String
+  line         Int?
+  titlePath    String[] @map("title_path")
+  browser      String?
+  status       String
+  retries      Int      @default(0)
+  durationMs   Int?     @map("duration_ms")
+  errorMessage String?  @map("error_message")
+  errorStack   String?  @map("error_stack")
+  errorSnippet String?  @map("error_snippet")
+  tags         String[] @default([])
+  fingerprint  String?
+  issueId      BigInt?  @map("issue_id")
+  issueAction  String?  @map("issue_action")
+
+  run   AutomationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  issue Issue?        @relation(fields: [issueId], references: [id])
+
+  @@map("automation_results")
+}
+
+model Attachment {
+  id                  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId           BigInt   @map("project_id")
+  entity              String
+  entityId            BigInt   @map("entity_id")
+  kind                String   @default("file")
+  objectKey           String   @map("object_key")
+  fileName            String   @map("file_name")
+  mimeType            String   @map("mime_type")
+  sizeBytes           BigInt?  @map("size_bytes")
+  status              String   @default("pending")
+  uploadedBy          BigInt?  @map("uploaded_by")
+  uploadedByApiKeyId  String?  @map("uploaded_by_api_key_id") @db.Uuid
+  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  project Project @relation(fields: [projectId], references: [id])
+  user    User?   @relation(fields: [uploadedBy], references: [id])
+  apiKey  ApiKey? @relation(fields: [uploadedByApiKeyId], references: [id])
+
+  @@map("attachments")
+}
+
+model ActivityLog {
+  id             BigInt   @id @default(autoincrement())
+  projectId      BigInt?  @map("project_id")
+  entity         String
+  entityId       String   @map("entity_id")
+  action         String
+  changes        Json?
+  actorId        BigInt?  @map("actor_id")
+  actorApiKeyId  String?  @map("actor_api_key_id") @db.Uuid
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  project Project? @relation(fields: [projectId], references: [id])
+  actor   User?    @relation(fields: [actorId], references: [id])
+  apiKey  ApiKey?  @relation(fields: [actorApiKeyId], references: [id])
+
+  @@map("activity_log")
+}
+
+model Requirement {
+  id           BigInt    @id @default(autoincrement())
+  projectId    BigInt    @map("project_id")
+  kind         String
+  code         String
+  name         String
+  traceRef     String?   @map("trace_ref")
+  lastCaseSeq  Int       @default(0) @map("last_case_seq")
+  rank         String
+  deletedAt    DateTime? @map("deleted_at") @db.Timestamptz(6)
+  project      Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  epicLinks     RequirementLink[]   @relation("LinkEpic")
+  functionLinks RequirementLink[]   @relation("LinkFunction")
+  sources       RequirementSource[]
+  testCases     TestCase[]
+
+  @@unique([projectId, code])
+  @@map("requirements")
+}
+
+model RequirementLink {
+  epicId     BigInt      @map("epic_id")
+  functionId BigInt      @map("function_id")
+  epic       Requirement @relation("LinkEpic", fields: [epicId], references: [id], onDelete: Cascade)
+  function   Requirement @relation("LinkFunction", fields: [functionId], references: [id], onDelete: Cascade)
+
+  @@id([epicId, functionId])
+  @@map("requirement_links")
+}
+
+model RequirementSource {
+  id            BigInt      @id @default(autoincrement())
+  requirementId BigInt      @map("requirement_id")
+  path          String
+  position      Int         @default(0)
+  requirement   Requirement @relation(fields: [requirementId], references: [id], onDelete: Cascade)
+
+  @@map("requirement_sources")
+}
+
+model TestCategory {
+  id        BigInt     @id @default(autoincrement())
+  projectId BigInt     @map("project_id")
+  name      String
+  position  Int        @default(0)
+  project   Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  testCases TestCase[]
+
+  @@unique([projectId, name])
+  @@map("test_categories")
+}
+
+model TestCase {
+  id             BigInt    @id @default(autoincrement())
+  projectId      BigInt    @map("project_id")
+  functionId     BigInt    @map("function_id")
+  seq            Int
+  code           String
+  title          String
+  priority       String    @default("medium")
+  categoryId     BigInt?   @map("category_id")
+  preconditions  String?
+  steps          Json      @default("[]")
+  status         String    @default("not_started")
+  notes          String?
+  automationTag  String?   @map("automation_tag")
+  version        Int       @default(1)
+  rank           String
+  searchText     Unsupported("tsvector")? @map("search_text")
+  createdBy      BigInt?   @map("created_by")
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedBy      BigInt?   @map("updated_by")
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt      DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  project  Project       @relation(fields: [projectId], references: [id])
+  function Requirement   @relation(fields: [functionId], references: [id])
+  category TestCategory? @relation(fields: [categoryId], references: [id])
+  creator  User?         @relation("TestCaseCreator", fields: [createdBy], references: [id])
+  updater  User?         @relation("TestCaseUpdater", fields: [updatedBy], references: [id])
+  bugs     TestCaseBug[]
+  versions TestCaseVersion[]
+
+  @@unique([projectId, code])
+  @@unique([functionId, seq])
+  @@map("test_cases")
+}
+
+model TestCaseBug {
+  testCaseId BigInt   @map("test_case_id")
+  issueId    BigInt   @map("issue_id")
+  testCase   TestCase @relation(fields: [testCaseId], references: [id], onDelete: Cascade)
+  issue      Issue    @relation(fields: [issueId], references: [id], onDelete: Cascade)
+
+  @@id([testCaseId, issueId])
+  @@map("test_case_bugs")
+}
+
+model TestCaseVersion {
+  testCaseId BigInt   @map("test_case_id")
+  version    Int
+  snapshot   Json
+  changedBy  BigInt?  @map("changed_by")
+  changedAt  DateTime @default(now()) @map("changed_at") @db.Timestamptz(6)
+  testCase   TestCase @relation(fields: [testCaseId], references: [id], onDelete: Cascade)
+  user       User?    @relation(fields: [changedBy], references: [id])
+
+  @@id([testCaseId, version])
+  @@map("test_case_versions")
+}

@@ -1,0 +1,30 @@
+{
+  "name": "ospm",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@9.14.2",
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev --parallel",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "format": "prettier --write \"**/*.{ts,tsx,json,md}\" --ignore-path .gitignore",
+    "db:migrate": "pnpm --filter @ospm/api prisma:deploy",
+    "db:seed": "pnpm --filter @ospm/api seed",
+    "db:seed:large": "pnpm --filter @ospm/api seed:large",
+    "openapi": "pnpm --filter @ospm/api openapi",
+    "api:gen": "pnpm --filter @ospm/web api:gen",
+    "simulate-ingest": "tsx scripts/simulate-ingest.ts",
+    "typecheck": "turbo run typecheck"
+  },
+  "devDependencies": {
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
+    "eslint": "^8.57.1",
+    "prettier": "^3.3.3",
+    "tsx": "^4.19.2",
+    "turbo": "^2.3.0",
+    "typescript": "~5.6.3",
+    "@types/node": "^20.17.6"
+  }
+}
